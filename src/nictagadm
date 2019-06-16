@@ -30,6 +30,8 @@ EXISTS_NAMES=
 HAVE_USB=
 LIST_LINE="%-14s %-18s %-14s %-16s\n"
 LOCAL=
+BRIDGE=
+SIMNET=
 NO_LIST_STUBS=
 PARSABLE=
 PROPS=
@@ -87,12 +89,16 @@ General Options:
             Print help and exit
 
 Subcommands:
-        add             [-l] [-p prop=value,...] <name> [mac]
+        add             [-l] [-b] [-s] [-p prop=value,...] <name> [mac]
         delete          [-f] <name>
         exists          [-l] <name>
         list            [-l | -L] [-p] [-d delim]
         update          [-l] [-p prop=value,...] <name> [mac]
-        vms             <name>
+	add-bridgeport	<bridge> <tag>
+	delete-bridgeport <bridge> <tag>
+	add-simnetconn <fromport> <toport>
+	delete-simnetconn <fromport> <toport>
+	vms             <name>
 
 See nictagadm(1M) for more information
 USAGE
@@ -169,6 +175,21 @@ function valid_stub_name()
     [[ -n $n ]] && (( len <= 31 )) && [[ $n =~ $re ]]
 }
 
+# Returns zero for valid etherstub names, non-zero otherwise. Valid names:
+# * Consist only of alphanumeric characters plus _
+# * <= 31 characters
+# * Have a number at the end (in order to be a valid link name)
+function valid_bridge_name()
+{
+    local n=$1
+    local len=${#n}
+	echo "bridge!"
+	# TODO needs more refinement.
+    local re='^[a-zA-Z0-9_]*[a-zA-Z_]$'
+
+    [[ -n $n ]] && (( len <= 31 )) && [[ $n =~ $re ]]
+}
+
 function valid_gen_name()
 {
     local n=$1
@@ -183,6 +204,9 @@ function valid_gen_name()
 function nic_exists()
 {
     local out=$(dladm show-phys -pmo address)
+    (( $? == 0 )) || fatal 'failed to call dladm'
+	out="$out
+	$(dladm show-simnet -po macaddress)"
     (( $? == 0 )) || fatal 'failed to call dladm'
     local mac
     while read -r mac; do
@@ -210,9 +234,64 @@ function get_link_names()
     while IFS=: read mac link; do
         mac=$(normalize_mac "$mac")
         LINKS[$mac]=$link
+		LINK_TYPES[$mac]='normal'
     done <<< "$out"
 }
 
+function get_simnet_names()
+{
+    local out=$(dladm show-simnet -po macaddress,link)
+    (( $? == 0 )) || fatal 'failed to call dladm'
+    local mac link
+    while IFS=: read mac link; do
+	[[ -z $mac ]] && continue
+        mac=$(normalize_mac "$mac")
+        LINKS[$mac]=$link
+		LINK_TYPES[$mac]='simnet'
+    done <<< "$out"
+}
+
+function get_bridge_names()
+{
+    local out=$(dladm show-bridge -po address,bridge)
+    (( $? == 0 )) || fatal 'failed to call dladm'
+    local mac link prio
+    while IFS=: read mac link; do
+		while IFS=/ read prio mac; do
+	        mac=$(normalize_mac "$mac")
+		done <<< "$mac" 
+        LINKS["${prio}/${mac}"]=$link
+		LINK_TYPES["${prio}/${mac}"]='bridge'
+    done <<< "$out"
+}
+
+
+# helper that prints device name for the nic/etherstub/simnet/etc pointing to a tag
+function device_from_tag() 
+{
+	cmd_tag_list > /dev/null
+
+	valid_gen_name "$1" || return 1
+
+	typ=${TAG_TYPES[$1]}
+
+	[[ $typ == "simnet" ]] && (echo $1; return 0)
+	[[ $typ == "etherstub" ]] && (echo $1; return 0)
+    [[ $typ == "normal" ]] && device_from_normal $1 && return 0
+	return 1
+}
+
+function device_from_normal() 
+{
+	mac=${TAGS[$1]}
+	
+   for d in "${!LINKS[@]}"; do
+	   	[[ $mac != $d ]] && continue;
+   		echo ${LINKS[$d]}
+		return 0
+   done
+   return 1
+}
 
 # helper to set global "normalized" to the expanded version of MAC ($1)
 function normalize_mac()
@@ -399,6 +478,99 @@ function tag_exists()
     return 1
 }
 
+function bridge_exists()
+{
+	local typ
+    cmd_tag_list > /dev/null
+
+    valid_gen_name "$1" || return 1
+
+    typ=${TAG_TYPES[$1]}
+    [[ $typ == "bridge" ]] && return 0
+    
+	return 1  
+}
+
+function simnet_exists()
+{
+  	local typ
+	cmd_tag_list > /dev/null
+	
+	valid_gen_name "$1" || return 1
+	
+	typ=${TAG_TYPES[$1]}
+	
+	[[ $typ == "simnet" ]] && return 0
+	
+	return 1
+}
+
+function simnet_noconn()
+{
+	cmd_tag_list > /dev/null
+
+	valid_gen_name "$1" || return 1
+
+	typ=${TAG_TYPES[$1]}
+	
+	[[ $typ == "simnet" ]] || return 1
+
+	portmatch=$(dladm show-simnet -p -o otherlink $1 | grep -v .)
+		
+	[[ -z $portmatch ]] && return 0
+
+	return 1
+}
+
+function simnet_conn_exists()
+{
+    local fromport toport
+	
+	# our convention is to connect a -> b where a and b are in alphabetical order.
+	# bash 3+-ism here
+	if [[ $1 > $2 ]] ; then
+		fromport=$1
+		toport=$2
+	else
+		fromport=$2
+		toport=$1
+	fi
+	
+	cmd_tag_list > /dev/null
+
+	valid_gen_name "$fromport" || return 1
+	valid_gen_name "$toport" || return 1
+
+	typ=${TAG_TYPES[$fromport]}
+	
+	[[ $typ == "simnet" ]] || return 1
+
+	portmatch=$(dladm show-simnet -p -o otherlink $fromport | grep "$toport")
+	[[ -n $portmatch ]] && return 0
+
+	return 1
+}
+
+function bridge_has_port()
+{
+	local bridge port typ
+	
+	bridge=$1
+	port=$2
+	
+	cmd_tag_list > /dev/null
+
+	valid_gen_name "$1" || return 1
+
+	typ=${TAG_TYPES[$bridge]}
+	
+	[[ $typ == "bridge" ]] || return 1
+
+	portmatch=$(dladm show-bridge -ls -p -o link $bridge | grep "$port")
+	[[ -n $portmatch ]] && return 0
+
+	return 1
+}
 
 function tag_in_use()
 {
@@ -448,6 +620,136 @@ function conf_add_etherstub()
             echo "etherstub=$1" >> "$conf.$$"
         fi
         [[ $? != 0 ]] && fatal "could not write to '$conf.$$'"
+    done
+
+    move_files
+}
+
+# Adds a bridge config item to all conf files
+function conf_add_bridge()
+{
+    local conf bridge_line
+    verbose "Adding bridge: $1"
+
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "config file '$conf' does not exist: not adding bridge"
+            continue
+        fi
+        verbose "Adding bridge '$1' to '$conf'"
+
+        bridge_line=$(grep '^bridge=' "$conf" | tail -n 1)
+        grep -v '^bridge=' "$conf" > "$conf.$$"
+
+        # If the value of the bridge line is empty, just replace the
+        # whole line
+        echo "$bridge_line" | grep '^bridge=\s*$' > /dev/null 2>&1
+        [[ $? == "0" ]] && bridge_line=""
+
+        if [[ -n $bridge_line ]]; then
+            echo "$bridge_line,$1" >> "$conf.$$"
+        else
+            echo "bridge=$1" >> "$conf.$$"
+        fi
+        [[ $? != 0 ]] && fatal "could not write to '$conf.$$'"
+    done
+
+    move_files
+}
+
+# Adds a simnet config item to all conf files
+function conf_add_simnet()
+{
+    local conf simnet_line
+    verbose "Adding simnet: $1"
+
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "config file '$conf' does not exist: not adding simnet"
+            continue
+        fi
+        verbose "Adding simnet '$1' to '$conf'"
+
+        simnet_line=$(grep '^simnet=' "$conf" | tail -n 1)
+        grep -v '^simnet=' "$conf" > "$conf.$$"
+
+        # If the value of the simnet line is empty, just replace the
+        # whole line
+        echo "$simnet_line" | grep '^simnet=\s*$' > /dev/null 2>&1
+        [[ $? == "0" ]] && simnet_line=""
+
+        if [[ -n $simnet_line ]]; then
+            echo "$simnet_line,$1" >> "$conf.$$"
+        else
+            echo "simnet=$1" >> "$conf.$$"
+        fi
+        [[ $? != 0 ]] && fatal "could not write to '$conf.$$'"
+    done
+
+    move_files
+}
+
+# Adds a bridge - port mapping config item to all conf files
+function conf_add_bridgeport()
+{
+    local conf bridgeport_line
+    verbose "Adding port $2 to bridge: $1"
+
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "config file '$conf' does not exist: not adding bridge port"
+            continue
+        fi
+        verbose "Adding bridge '$1' port '$2' to '$conf'"
+
+        bridgeport_line=$(grep ""^bridge_$1_ports="" "$conf" | tail -n 1)
+        grep -v "^bridge_$1_ports=" "$conf" > "$conf.$$"
+
+        # If the value of the simnet line is empty, just replace the
+        # whole line
+        echo "$bridgeport_line" | grep "^bridge_$1_ports=\s*$" > /dev/null 2>&1
+        [[ $? == "0" ]] && bridgeport_line=""
+
+        if [[ -n $bridgeport_line ]]; then
+            echo "$bridgeport_line,$2" >> "$conf.$$"
+        else
+            echo "bridge_$1_ports=$2" >> "$conf.$$"
+        fi
+        [[ $? != 0 ]] && fatal "could not write to '$conf.$$'"
+    done
+
+    move_files
+}
+
+# Adds a simnet connection config item to all conf files
+function conf_add_simnetconn()
+{
+    local conf simnetconn_line fromport toport
+	
+	# our convention is to connect a -> b where a and b are in alphabetical order.
+	# bash 3+-ism here
+	if [[ $1 > $2 ]] ; then
+		fromport=$1
+		toport=$2
+	else
+		fromport=$2
+		toport=$1
+	fi		
+	
+    verbose "Connecting simnet port $frompor to simnet port: $toport"
+
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "config file '$conf' does not exist: not adding simnet connection"
+            continue
+        fi
+        verbose "Adding connection between simnet ports '$fromport' and '$toport' to '$conf'"
+
+        simnetconn_line=$(grep "^simnet_${fromport}_port=" "$conf" | tail -n 1)
+        grep -v "^simnet_$fromport_port=" "$conf" > "$conf.$$"
+
+        echo "simnet_${fromport}_port=${toport}" >> "$conf.$$"
+		[[ $? != 0 ]] && fatal "could not write to '$conf.$$'"
     done
 
     move_files
@@ -549,6 +851,117 @@ function conf_delete_etherstub()
     move_files
 }
 
+# Deletes an bridge from all conf files
+#
+# TODO either delete all bridge associations
+function conf_delete_bridge()
+{
+    local conf bridge_line
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "File '$conf' does not exist: not deleting bridge"
+            continue
+        fi
+        verbose "Deleting bridge '$1' from '$conf'"
+
+        bridge_line=$(grep '^bridge=' "$conf" | tail -n 1)
+        grep -v '^bridge=' "$conf" > "$conf.$$"
+
+        # If there are no more bridge left in the line, just omit it
+        # from the file
+        echo "$bridge_line" | grep -q '^bridge=\s*$'
+        [[ $? == "0" ]] && bridge_line=""
+
+        if [[ -n $bridge_line ]]; then
+            echo "$bridge_line" | sed -e "s/$1,*//" | sed -e s/,$// >> "$conf.$$"
+        fi
+    done
+
+    move_files
+}
+
+# Deletes an simnet from all conf files
+function conf_delete_simnet()
+{
+    local conf simnet_line
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "File '$conf' does not exist: not deleting simnet"
+            continue
+        fi
+        verbose "Deleting simnet '$1' from '$conf'"
+
+        simnet_line=$(grep '^simnet=' "$conf" | tail -n 1)
+        grep -v '^simnet=' "$conf" > "$conf.$$"
+
+        # If there are no more bridge left in the line, just omit it
+        # from the file
+        echo "$simnet_line" | grep -q '^simnet=\s*$'
+        [[ $? == "0" ]] && simnet_line=""
+
+        if [[ -n $simnet_line ]]; then
+            echo "$simnet_line" | sed -e "s/$1,*//" | sed -e s/,$// >> "$conf.$$"
+        fi
+    done
+
+    move_files
+}
+
+# Deletes a bridge-port from all conf files
+function conf_delete_bridgeport()
+{
+    local conf bridgeport_line
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "File '$conf' does not exist: not deleting bridge port"
+            continue
+        fi
+        verbose "Deleting port '$2' from bridge '$1' from '$conf'"
+
+        bridgeport_line=$(grep "^bridge_$1_ports=" "$conf" | tail -n 1)
+        grep -v "^bridge_$1_ports=" "$conf" > "$conf.$$"
+
+        # If there are no more bridge left in the line, just omit it
+        # from the file
+        echo "$bridgeport_line" | grep -q "^bridge_$1_ports=\s*$"
+        [[ $? == "0" ]] && bridgeport_line=""
+
+        if [[ -n $bridgeport_line ]]; then
+            echo "$bridgeport_line" | sed -e "s/$2,*//" | sed -e s/,$// >> "$conf.$$"
+        fi
+    done
+
+    move_files
+}
+
+# Deletes a bridge-port from all conf files
+function conf_delete_simnetconn()
+{
+    local conf simnetconn_line fromport toport
+	
+	# our convention is to connect a -> b where a and b are in alphabetical order.
+	# bash 3+-ism here
+	if [[ $1 > $2 ]] ; then
+		fromport=$1
+		toport=$2
+	else
+		fromport=$2
+		toport=$1
+	fi
+    for conf in "${CONF_FILES[@]}"; do
+        if [[ ! -f $conf ]]; then
+            verbose "File '$conf' does not exist: not deleting simnet connection"
+            continue
+        fi
+        verbose "Deleting connection between simnet ports '$2' and '$1' from '$conf'"
+
+        simnetconn_line=$(grep "^simnet_$1_port=" "$conf" | tail -n 1)
+        grep -v "^simnet_$1_port=" "$conf" > "$conf.$$"
+    done
+
+    move_files
+}		
+
 # prints one tag / mac / link line, optionally formatted to be parseable
 function print_line()
 {
@@ -618,11 +1031,13 @@ function cmd_tag_exists()
 
 function cmd_tag_list()
 {
-    local tag val key stub_line mac rl conf stub
+	    local tag val key stub_line bridge_line simnet_line mac rl conf stub bridge simnet
 
     [[ -z $PARSABLE ]] && printf "$LIST_LINE" \
         "NAME" "MACADDRESS" "LINK" "TYPE"
     get_link_names
+    get_simnet_names
+    get_bridge_names
 
     if [[ -z $LOCAL ]]; then
         # turn conf into associative array
@@ -634,7 +1049,7 @@ function cmd_tag_list()
         done < "$CONF"
 
         # loop config variables related to nic
-        nic_re='_nic$'
+	        nic_re='_nic$'
         for key in "${!conf[@]}"; do
             [[ $key =~ $nic_re ]] || continue
             tag=${key%_nic}
@@ -644,8 +1059,14 @@ function cmd_tag_list()
                 TAG_TYPES[$tag]='aggr'
                 print_line "$tag" "-" "$val"
             else
-                TAG_TYPES[$tag]='normal'
+				link_type=${LINK_TYPES[$val]}
+				if [ $link_type != 'normal' ] ; then
+					TAG_TYPES[$tag]=$link_type
+				else	
+                  TAG_TYPES[$tag]='normal'
+				fi
                 mac=$(normalize_mac "$val")
+				TAGS[$tag]=$mac
                 print_line "$tag" "$mac"
             fi
         done
@@ -692,25 +1113,214 @@ function cmd_tag_list()
         [[ -n $stub ]] || continue
         print_line "$stub" '-'
     done < <(printf '%s\n' "${!stubs_union[@]}" | sort)
+
+    # create a union of the bridges found in dladm show-bridge
+    # and the config
+    declare -A bridges_union
+
+    # read dladm
+    while read -r bridge; do
+        BRIDGES_UP[$bridge]=true
+        bridges_union[$bridge]=true
+        TAG_TYPES[$bridge]='bridge'
+    done < <(dladm show-bridge -p -o bridge)
+
+    # read the config
+    bridge_line=$(grep '^bridge=' "$CONF" | tail -n 1)
+    if [[ -n $bridge_line ]]; then
+        IFS='=' read -r _ value <<< "$bridge_line"
+        IFS=, read -ra values <<< "$value"
+
+        for bridge in "${values[@]}"; do
+            bridges_union[$bridge]=true
+            TAG_TYPES[$bridge]='bridge'
+        done
+    fi
+
+    # loop everything found after sorting
+    while read -r bridge; do
+        [[ -n $bridge ]] || continue
+        print_line "$bridge" '-'
+    done < <(printf '%s\n' "${!bridges_union[@]}" | sort)
+	
+	
+    # create a union of the stubs found in dladm show-etherstub
+    # and the config
+    declare -A simnets_union
+
+    # read dladm
+    while read -r simnet; do
+        SIMNETS_UP[$simnet]=true
+        simnets_union[$simnet]=true
+        TAG_TYPES[$simnet]='simnet'
+    done < <(dladm show-simnet -p -o link)
+
+    # read the config
+    simnet_line=$(grep '^simnet=' "$CONF" | tail -n 1)
+    if [[ -n $simnet_line ]]; then
+        IFS='=' read -r _ value <<< "$simnet_line"
+        IFS=, read -ra values <<< "$value"
+
+        for simnet in "${values[@]}"; do
+            simnets_union[$simnet]=true
+            TAG_TYPES[$simnet]='simnet'
+        done
+    fi
+
+    # loop everything found after sorting
+    while read -r simnet; do
+        [[ -n $simnet ]] || continue
+        print_line "$simnet" '-'
+    done < <(printf '%s\n' "${!simnets_union[@]}" | sort)
 }
 
+function cmd_bridgeport_add()
+{
+	local bridge port
+	
+	bridge=$1
+	port=$2
+	
+	[[ -z $bridge ]] && usage
+	[[ -z $port ]] && usage
+
+	bridge_exists "$bridge" || fatal "bridge '$bridge' does not exist"
+    tag_exists "$port" || fatal "tag '$port' does not exist"
+	
+# TODO we need to do more checking to ensure that the add-bridge command will
+# succeed before we save the configuration.
+	
+	dev=$(device_from_tag $port)
+
+    bridge_has_port $bridge $dev && fatal "tag '$port' for dev '$dev' is already atttached to bridge '$bridge'"
+
+	verbose Adding device $dev to bridge $bridge.
+	
+	echo adding $port = $dev to $bridge
+    conf_add_bridgeport "$bridge" "$port"
+    dladm add-bridge -l "$dev" "$bridge" || \
+        fatal "Could not add port '$port' to bridge '$bridge'"
+
+    update_sysinfo
+    umount_usb
+}
+
+function cmd_bridgeport_delete()
+{
+	local bridge port
+	
+	bridge=$1
+	port=$2
+	
+	[[ -z $bridge ]] && usage
+	[[ -z $port ]] && usage
+
+	bridge_exists "$bridge" || fatal "bridge '$bridge' does not exist"
+    tag_exists "$port" || fatal "tag '$port' does not exist"
+
+# TODO we need to do more checking to ensure that the add-bridge command will
+# succeed before we save the configuration.
+
+	dev=$(device_from_tag $port)
+	
+    bridge_has_port $bridge $dev || fatal "tag '$port' for dev '$dev' is not atttached to bridge '$bridge'"
+
+	verbose Adding device $dev to bridge $bridge.
+
+
+    conf_delete_bridgeport "$bridge" "$port"
+    dladm remove-bridge -l "$dev" "$bridge" || \
+        fatal "Could not remove port '$port' from bridge '$bridge'"
+
+    update_sysinfo
+    umount_usb
+}
+
+function cmd_simnetconn_add()
+{
+    local fromport toport
+	
+	# our convention is to connect a -> b where a and b are in alphabetical order.
+	# bash 3+-ism here
+	if [[ $1 > $2 ]] ; then
+		fromport=$1
+		toport=$2
+	else
+		fromport=$2
+		toport=$1
+	fi
+	
+	[[ -z $fromport ]] && usage
+	[[ -z $toport ]] && usage
+	
+	simnet_exists "$fromport" || fatal "tag '$fromport' does not exist or is not a simnet."
+	simnet_exists "$toport" || fatal "tag '$toport' does not exist or is not a simnet."
+	
+	simnet_noconn $fromport && fatal "simnet port '$fromport' already has a connection."
+	simnet_noconn $toport && fatal "simnet port '$toport' already has a connection."
+	
+	conf_add_simnetconn "$fromport" "$toport"
+	dladm modify-simnet -t -p $toport $fromport || \
+		fatal "Could not add connection between '$fromport' and '$toport'"
+	
+	update_sysinfo
+	umount_usb
+}
+
+function cmd_simnetconn_delete()
+{
+    local fromport toport
+	
+	# our convention is to connect a -> b where a and b are in alphabetical order.
+	# bash 3+-ism here
+	if [[ $1 > $2 ]] ; then
+		fromport=$1
+		toport=$2
+	else
+		fromport=$2
+		toport=$1
+	fi
+	
+	[[ -z $fromport ]] && usage
+	[[ -z $toport ]] && usage
+	
+	simnet_exists "$fromport" || fatal "tag '$fromport' does not exist or is not a simnet."
+	simnet_exists "$toport" || fatal "tag '$toport' does not exist or is not a simnet."
+	
+	simnet_conn_exists $fromport $toport || fatal "simnet port '$fromport' and '$toport' are not connected."
+
+	
+	conf_delete_simnetconn "$fromport" "$toport"
+	dladm modify-simnet -t -p none $fromport || \
+		fatal "Could not add connection between '$fromport' and '$toport'"
+	
+	update_sysinfo
+	umount_usb
+}
 
 function cmd_tag_add()
 {
-    local name mac mtu
+    local name mac mtu OK
 
     name=$1
+
     [[ -z $name ]] && usage
 
     [[ -n $2 && -n ${PROPS['mac']} ]] && fatal "mac address specified twice"
     [[ -n $2 ]] && mac=$2
     [[ -n ${PROPS['mac']} ]] && mac=${PROPS['mac']}
 
-    [[ -z $mac && -z $LOCAL ]] && fatal \
+    [[ -z $mac && -z $LOCAL && -z $BRIDGE && -z $SIMNET ]] && fatal \
         "create non-local tag, but no mac address specified"
 
     [[ -n $mac && -n $LOCAL ]] && fatal \
         "create local tag, but mac address specified"
+
+    [[ -n $mac && -n $BRIDGE ]] && fatal \
+        "create bridge, but mac address specified"
+
+    [[ -n $mac && -n $SIMNET ]] && fatal \
+        "create simnet, but mac address specified"
 
     mtu=${PROPS['mtu']}
     [[ -n $mtu && -n $LOCAL ]] && fatal "Cannot specify MTU for local nic tag"
@@ -724,7 +1334,10 @@ function cmd_tag_add()
     #
     if [[ -n $mac ]]; then
         if valid_stub_name "$mac"; then
-            aggr_exists "$mac" || fatal "aggregation '$mac' does not exist"
+			OK=0
+            aggr_exists "$mac" && OK=1
+			simnet_exists "$mac" && OK=1
+			[[ OK == 0 ]] && fatal "no aggregation or simnet '$mac' exists"
         else
             valid_mac "$mac" || fatal "MAC address '$mac' is invalid"
             mac=$(normalize_mac "$mac")
@@ -733,10 +1346,17 @@ function cmd_tag_add()
         fi
 
         valid_name "$name" || "nic tag name is invalid"
-    else
-        valid_stub_name "$name" || fatal "nic tag name is invalid"
-    fi
-
+	
+  	elif [[ -n $LOCAL ]]; then
+		echo LOCAL
+     	 	valid_stub_name "$name" || fatal "nic tag name is invalid"
+  	elif [[ -n $BRIDGE ]]; then
+		echo "BRIDGE..."
+  		valid_bridge_name "$name" || fatal "bridge name is invalid"
+	elif [[ -n $SIMNET ]]; then
+		echo SIMNET
+      	valid_name "$name" || fatal "simnet name is invalid"
+   	fi
 
     verbose "adding nic tag: name='$name', mac='$mac', local='$LOCAL'"
     [[ -n $mtu ]] && verbose "adding mtu for tag: name='$name', mtu='$mtu'"
@@ -746,6 +1366,14 @@ function cmd_tag_add()
         conf_add_etherstub "$name"
         dladm create-etherstub -t "$name" || \
             fatal "Could not create etherstub '$name'"
+	elif [[ -n $BRIDGE ]]; then
+        conf_add_bridge "$name"
+        dladm create-bridge "$name" || \
+            fatal "Could not create bridge '$name'"
+	elif [[ -n $SIMNET ]]; then
+        conf_add_simnet "$name"
+        dladm create-simnet  "$name" || \
+            fatal "Could not create simnet '$name'"		
     else
         conf_add_tag "$name" "$mac" "$mtu"
     fi
@@ -765,6 +1393,8 @@ function cmd_tag_update()
     name=$1
     [[ -z $name ]] && usage
     [[ -n $LOCAL ]] && fatal "cannot update a local tag"
+    [[ -n $BRIDGE ]] && fatal "cannot update a bridge tag"
+    [[ -n $SIMNET ]] && fatal "cannot update a simnet tag"
 
     #
     # We require either the presence of the MTU or mac address, though
@@ -818,6 +1448,8 @@ function cmd_tag_delete()
     local tag_type
     [[ -z $1 ]] && usage
     [[ -n $LOCAL ]] && usage
+	[[ -n $BRIDGE ]] && usage
+	[[ -n $SIMNET ]] && usage
 
     tag_exists "$1" || fatal "nic tag '$1' does not exist"
     [[ -z $FORCE ]] && tag_in_use "$1" && fatal "nic tag '$1' is in use"
@@ -828,7 +1460,11 @@ function cmd_tag_delete()
     tag_type=${TAG_TYPES[$1]}
     if [[ $tag_type == "etherstub" ]]; then
         conf_delete_etherstub "$1"
-    else
+	elif [[ $tag_type == "bridge" ]]; then
+	    conf_delete_bridge "$1"
+	elif [[ $tag_type == "simnet" ]]; then
+	    conf_delete_simnet "$1"
+	else
         conf_delete_tag "$1"
     fi
 
@@ -837,9 +1473,20 @@ function cmd_tag_delete()
         dladm delete-etherstub "$1" || fatal "could not remove etherstub '$1'"
     fi
 
+    if [[ -n ${BRIDGES_UP[$1]} ]]; then
+        verbose "bringing down bridge: $1"
+        dladm delete-bridge "$1" || fatal "could not remove bridge '$1'"
+    fi
+
+    if [[ -n ${SIMNETS_UP[$1]} ]]; then
+        verbose "bringing down simnet: $1"
+        dladm delete-simnet "$1" || fatal "could not remove simnet '$1'"
+    fi
+	
     update_sysinfo
     umount_usb
 }
+
 
 
 function cmd_tags_used_by()
@@ -891,29 +1538,47 @@ fi
 declare -A PROPS
 
 # mapping of normalized mac addresses => link name, e.g.:
+# TAGS['admin'] = 'f4:6d:04:04:51:d4'
 # LINKS['f4:6d:04:04:51:d4'] == 'rge0'
 # LINKS['00:04:23:bd:18:29'] == 'e1000g0'
+declare -A TAGS
 declare -A LINKS
+declare -A LINK_TYPES
 
 # etherstubs that are up (in dladm)
 # e.g. if [[ -n ${STUBS_UP['foobar0']} ]]; then ...; fi
 declare -A STUBS_UP
 
+# bridges that are up (in dladm)
+# e.g. if [[ -n ${BRIDGES_UP['foobar0']} ]]; then ...; fi
+declare -A BRIDGES_UP
+
+# simnets that are up (in dladm)
+# e.g. if [[ -n ${SIMNETS_UP['foobar0']} ]]; then ...; fi
+declare -A SIMNETS_UP
+
 # mapping of tag names to their type, e.g.:
 # TAG_TYPES['admin'] == 'normal'
 # TAG_TYPES['foobar0'] == 'etherstub'
-# possible types: normal, etherstub, aggr, overlay_rule.
+# possible types: normal, etherstub, bridge, simnet, aggr, overlay_rule.
 declare -A TAG_TYPES
 
 CMD=$1
 shift
 case "$CMD" in
 add|update)
-    while getopts "lp:" c; do
+    while getopts "lbsp:" c; do
         case "$c" in
         l)
             LOCAL="true"
             ;;
+		b)
+echo bridge!
+			BRIDGE="true"
+			;;
+		s)	
+			SIMNET="true"
+			;;
         p)
             parse_props "$OPTARG"
             ;;
@@ -950,7 +1615,7 @@ list)
             ;;
         l)
             LOCAL="true"
-            ;;
+			;;
         L)
             NO_LIST_STUBS="true"
             ;;
@@ -985,6 +1650,7 @@ esac
 
 shift "$(( OPTIND - 1 ))"
 
+# need better checking for simnet and bridge options
 [[ -n $LOCAL ]] && [[ -n $NO_LIST_STUBS ]] && \
     fatal "Cannot specify both local and non-local options"
 
@@ -997,11 +1663,25 @@ fi
 
 case "$CMD" in
 add)
+	echo "1: $1"
+	echo "2: $2"
     cmd_tag_add "$1" "$2"
     ;;
+add-bridgeport)
+	cmd_bridgeport_add "$1" "$2"
+	;;
+add-simnetconn)
+	cmd_simnetconn_add "$1" "$2"
+	;;
 delete)
     cmd_tag_delete "$1"
     ;;
+delete-bridgeport)
+	cmd_bridgeport_delete "$1" "$2"
+	;;
+delete-simnetconn)
+	cmd_simnetconn_delete "$1" "$2"
+	;;	
 exists)
     cmd_tag_exists "$@"
     ;;

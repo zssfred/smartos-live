@@ -370,12 +370,17 @@ function is_aggr() {
 
 function get_smartos_network_interfaces()
 {
-    count=1
+   count=1
 
     # ignore 'LINK SLOT ADDRESS INUSE CLIENT' line
-    for line in $(/sbin/dladm show-phys -m \
-        | grep -v "^LINK " | awk '{ print $1,$3 }' | tr ' ' '='); do
-
+	lines=$(/sbin/dladm show-phys -m \
+			| grep -v "^LINK " | awk '{ print $1,$3 }' | tr ' ' '=')
+	simnets=$(/sbin/dladm show-simnet \
+			| grep -v "^LINK " | awk '{ print $1,$3 }' | tr ' ' '=')
+	# lines="$lines $simnets"
+	lines="$lines"
+    for line in $lines ; do
+			
         nicnames=
         fields=(${line//=/ })
         iface=${fields[0]}
@@ -384,7 +389,8 @@ function get_smartos_network_interfaces()
         ip4addr=$(ifconfig ${iface} 2>/dev/null \
             | grep "inet " | awk '{ print $2 }')
 
-        nic_tag_count=0
+				        
+nic_tag_count=0
         while [[ ${nic_tag_count} -lt ${NicTagCount} ]]; do
             tag_name=${NicTagNames[${nic_tag_count}]}
             tag_mac=${NicTagMacs[${nic_tag_count}]}
@@ -504,6 +510,57 @@ function get_smartos_network_interfaces()
     #  eval "nicnames=\${Network_Interface_${iface}_NIC_Names}"
     #  echo "mac: ${mac} ---- ${ipv4} ---- ${nicnames}"
     #done
+}
+
+function get_bridges()
+{
+    count=1
+
+    # ignore 'BRIDGE PROTECT ADDRESS PRIORITY DESROOT' line
+    for line in $(/sbin/dladm show-bridge \
+        | grep -v "^BRIDGE " | awk '{ print $1,$2,$3,$4 }' | tr ' ' '='); do
+        fields=(${line//=/ })
+        iface=${fields[0]}
+		addr=$(echo ${fields[2]} | awk -F '/' '{print $2}')
+		normalize_mac ${addr}
+		mac=${normalized}
+        Bridges[${count}]=${iface}
+        eval "Bridge_${iface}_MAC_Address=${mac}"
+        ((count++))
+    done
+}
+
+function get_simnets()
+{
+    count=1
+
+    # ignore 'LINK MEDIA MACADDRESS OTHERLINK' line
+    for line in $(/sbin/dladm show-simnet \
+        | grep -v "^LINK " | awk '{ print $1,$3,$4 }' | tr ' ' '='); do
+        fields=(${line//=/ })
+        iface=${fields[0]}
+		addr=$(echo ${fields[1]} | awk -F '/' '{print $1}')
+		normalize_mac ${addr}
+		mac=${normalized}
+        Simnets[${count}]=${iface}
+        eval "Simnet_${iface}_MAC_Address=${mac}"
+        ((count++))
+		
+        nic_tag_count=0
+        while [[ ${nic_tag_count} -lt ${NicTagCount} ]]; do
+            tag_name=${NicTagNames[${nic_tag_count}]}
+            tag_mac=${NicTagMacs[${nic_tag_count}]}
+            tag_link=${NicTagLinks[${nic_tag_count}]}
+            ((nic_tag_count++))
+            if  [[ "${tag_link}" == "${iface}" ]]; then
+                [[ -n ${nicnames} ]] && nicnames="${nicnames},"
+                nicnames="${nicnames}${tag_name}"
+echo "${nic_tag_count} ${tag_name}=${iface}"
+                NicTags[${nic_tag_count}]="${tag_name}=${iface}"
+            fi
+        done
+		
+    done
 }
 
 function get_smartos_vnics()
@@ -757,6 +814,18 @@ END
         echo "NIC_${tag_name}='${int}'"
     done
 
+    for iface in "${Bridges[@]}"; do
+        mac_var="Bridge_${iface}_MAC_Address"
+		eval "mac=\${${mac_var}}"
+		echo "${mac_var}='${mac}'"
+    done	
+	
+    for iface in "${Simnets[@]}"; do
+        mac_var="Simnet_${iface}_MAC_Address"
+		eval "mac=\${${mac_var}}"
+		echo "${mac_var}='${mac}'"
+    done	
+	
     for iface in "${NetworkInterfaces[@]}"; do
         mac_var="Network_Interface_${iface}_MAC_Address"
         ipv4_var="Network_Interface_${iface}_IPv4_Address"
@@ -957,6 +1026,42 @@ END
             | sed -e "s/^/  /" | sed -e "s/\]$/\],/"
     fi
 
+	cat << END
+  "Bridges": {
+END
+    printed=0
+    for iface in "${Bridges[@]}"; do
+        mac_var="Bridge_${iface}_MAC_Address"
+        eval "mac=\${${mac_var}}"
+
+        ((printed++))
+        trailing_comma=","
+        [[ ${printed} -eq ${#Bridges[*]} ]] && trailing_comma=''
+        echo -n "    \"${iface}\": {"
+        echo -n "\"MAC Address\": \"${mac}\"}"
+	
+       echo "${trailing_comma}"
+    done
+    echo "  },"
+
+	cat << END
+  "Simnets": {
+END
+    printed=0
+    for iface in "${Simnets[@]}"; do
+        mac_var="Simnet_${iface}_MAC_Address"
+        eval "mac=\${${mac_var}}"
+
+        ((printed++))
+        trailing_comma=","
+        [[ ${printed} -eq ${#BSimnets[*]} ]] && trailing_comma=''
+        echo -n "    \"${iface}\": {"
+        echo -n "\"MAC Address\": \"${mac}\"}"
+	
+       echo "${trailing_comma}"
+    done
+    echo "  },"
+
     cat <<END
   "Network Interfaces": {
 END
@@ -1088,6 +1193,8 @@ get_overlay_nic_tags
 get_admin_nic_tag
 get_admin_ip
 get_nic_tags
+get_simnets
+get_bridges
 get_smartos_network_interfaces
 get_smartos_vnics
 get_aggr_params
