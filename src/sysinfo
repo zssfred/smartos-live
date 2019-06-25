@@ -522,6 +522,7 @@ function get_bridges()
         fields=(${line//=/ })
         iface=${fields[0]}
 		addr=$(echo ${fields[2]} | awk -F '/' '{print $2}')
+                [[ addr -n ]] && addr="00:00:00:00:00:00"
 		normalize_mac ${addr}
 		mac=${normalized}
         Bridges[${count}]=${iface}
