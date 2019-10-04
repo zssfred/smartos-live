@@ -414,13 +414,21 @@ function bi_create_password
 #
 function bi_gen_version_files
 {
-	local etcrelease_template="$bi_wsroot/tools/etc_release.template.txt"
+	local etcrelease_template="$bi_wsroot/etc_release.template.txt"
 	local build_etcrelease="$bi_wsroot/tools/build_etcrelease"
+	local etcrelease_year=$(date +%Y)
 	local bvfile="$bi_mnt_root/etc/versions/build"
 	local gitstatus="$bi_out_dir/gitstatus.json"
 
 	bi_emit_start 'Building version files'
 
+	rm -f $etcrelease_template
+	cat > "$etcrelease_template" << EOF
+                      SmartOS %%VERSION%% x86_64
+                    Copyright $etcrelease_year Joyent, Inc.
+
+   Built with the following components:
+EOF
 	"$build_etcrelease" >"$gitstatus" ||
 	    fail "could not generate $gitstatus"
 
@@ -440,7 +448,7 @@ function bi_gen_version_files
 	"$build_etcrelease" "$bi_buildstamp" "$etcrelease_template" |
 	    pfexec /usr/bin/tee "$bi_mnt_root/etc/release" >/dev/null ||
 	     fail 'failed to build "/etc/release" file'
-
+	rm -f $etcrelease_template
 	bi_emit_done
 }
 
