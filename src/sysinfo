@@ -751,6 +751,19 @@ CPU_Count=${CPU_Count}
 MiB_of_Memory=${Memory_in_MiB}
 END
 
+if [[ ${ZONENAME} == "global" ]]; then
+    if [[ -n ${Zpool} ]]; then
+        cat <<END
+Zpool="${Zpool}"
+Zpool_Encrypted="${Zpool_encrypted}"
+Zpool_Disks="${Zpool_disks}"
+Zpool_Profile="${Zpool_profile}"
+Zpool_Creation="${Zpool_creation}"
+Zpool_Size_in_GiB="${Zpool_size}"
+END
+    fi
+fi
+
     for entry in "${Disks[@]}"; do
         fields=(${entry//=/ })
         disk=${fields[0]}
