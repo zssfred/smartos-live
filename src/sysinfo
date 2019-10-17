@@ -691,6 +691,18 @@ function get_setup()
     fi
 }
 
+function get_recovery_configs()
+{
+    for line in $(kbmadm recovery list -p 2>/dev/null); do
+        fields=(${line//:/ })
+        cfg=${fields[0]}
+        cfguuid=${fields[1]}
+        [[ -n "$cfguuid" ]] && \
+            printf -v "ZPool_Recovery_${cfg}" "%s" "$cfguuid" && \
+            has_recovery=1
+     done
+}
+
 function output_parsable()
 {
     cat <<END
@@ -923,6 +935,21 @@ if [[ ${ZONENAME} == "global" ]]; then
         echo '  "Zpool Size in GiB":' ${Zpool_size}','
     fi
 
+    if [[ -n "has_recovery" ]]; then
+        if [[ -n "$ZPool_Recovery_staged" ]]; then
+            comma=","
+        else
+            comma=""
+        fi
+
+        echo '  "ZPool Recovery": {'
+        [[ -n "${ZPool_Recovery_active}" ]] && \
+            echo '    "active": "'${ZPool_Recovery_active}'"'${comma}
+        [[ -n "${ZPool_Recovery_staged}" ]] && \
+            echo '    "staged": "'${ZPool_Recovery_staged}'"'
+        echo '  },'
+    fi
+
     echo '  "Disks": {'
 
     printed=0
@@ -1090,6 +1117,7 @@ if [[ ${ZONENAME} == "global" ]]; then
     get_vm_capable
     get_zpool
     get_disks
+    get_recovery_configs
     get_bootparams
     get_psrinfo
     get_sdc_version
