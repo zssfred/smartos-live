@@ -58,6 +58,7 @@ function build_section
 	local directory lastbranch description
 	directory=$1
 	lastbranch=$2
+	[[ "$directory" == "projects/local/kbmd/.git/.." ]] && return
 	cd $directory || fail "Unable to cd to $directory"
 	description=${3:-$(basename $PWD)}
 	echo $description ; echo "--------" ; echo
