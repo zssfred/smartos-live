@@ -85,7 +85,7 @@
 #define ATTACH_CHECK_INTERVAL 200000 // 200ms
 #define ZFD_OPEN_RETRIES 300 /* retries to open a zfd device (10 / second) */
 
-int addRoute(const char *, const char *, const char *, int);
+int addRoute(const char *, const char *, const char *, int, int);
 void closeIpadmHandle();
 static void execCmdline(strlist_t *, strlist_t *, const char *);
 static brand_t getBrand(void);
@@ -99,6 +99,10 @@ int raiseIf(char *, char *, char *);
 void runIpmgmtd(void);
 void setupHostname();
 void setupInterface(nvlist_t *data);
+void setupGateway(nvlist_t *data);
+void setupLinkLocalRoute(nvlist_t *data);
+void setupLinkLocalRoutes();
+void setupGateways();
 void setupInterfaces();
 static void doNfsMount(const char *nfsvolume, const char *mountpoint,
     boolean_t readonly);
@@ -713,8 +717,7 @@ execCmdline(strlist_t *cmdline, strlist_t *env, const char *workdir)
 void
 setupInterface(nvlist_t *data)
 {
-    char *iface, *gateway, *netmask, *ip;
-    boolean_t primary;
+    char *iface, *netmask, *ip;
     int ret;
 
     ret = nvlist_lookup_string(data, "interface", &iface);
@@ -730,15 +733,63 @@ setupInterface(nvlist_t *data)
                         iface);
                 }
             }
+        }
+    }
+}
+
+void
+setupGateway(nvlist_t *data)
+{
+     char *iface, *gateway, *ip;
+    boolean_t primary;
+    int ret;
+
+    ret = nvlist_lookup_string(data, "interface", &iface);
+    if (ret == 0) {
+        ret = nvlist_lookup_string(data, "ip", &ip);
+        if (ret == 0) {
             ret = nvlist_lookup_boolean_value(data, "primary", &primary);
             if ((ret == 0) && (primary == B_TRUE)) {
                 ret = nvlist_lookup_string(data, "gateway", &gateway);
                 if (ret == 0) {
-                    (void) addRoute(iface, gateway, "0.0.0.0", 0);
+                    (void) addRoute(iface, gateway, "0.0.0.0", 0, 0);
                 }
             }
         }
     }
+}
+
+void
+setupGateways()
+{
+    char *json;
+    nvlist_t *data, *nvl;
+    nvpair_t *pair;
+
+    if ((json = mdataGet("sdc:nics")) == NULL) {
+        dlog("WARN no NICs found in sdc:nics\n");
+        return;
+    }
+
+    if (nvlist_parse_json(json, strlen(json), &nvl, NVJSON_FORCE_INTEGER,
+      NULL) != 0) {
+        fatal(ERR_PARSE_JSON, "failed to parse nvpair json"
+            " for sdc:nics: %s\n", strerror(errno));
+    }
+    free(json);
+
+    for (pair = nvlist_next_nvpair(nvl, NULL); pair != NULL;
+      pair = nvlist_next_nvpair(nvl, pair)) {
+        if (nvpair_type(pair) == DATA_TYPE_NVLIST) {
+            if (nvpair_value_nvlist(pair, &data) != 0) {
+                fatal(ERR_PARSE_JSON, "failed to parse nvpair json"
+                    " for NIC: %s\n", strerror(errno));
+            }
+            setupGateway(data);
+        }
+    }
+
+    nvlist_free(nvl);
 }
 
 void
@@ -1081,7 +1132,7 @@ prefixToNetmask(int pfx, struct sockaddr_in *netmask_sin)
 }
 
 int
-addRoute(const char *ifname, const char *gw, const char *dst, int dstpfx)
+addRoute(const char *ifname, const char *gw, const char *dst, int dstpfx, int isLinkLocal)
 {
     int idx;
     int len;
@@ -1097,7 +1148,10 @@ addRoute(const char *ifname, const char *gw, const char *dst, int dstpfx)
 
     (void) bzero(rtm, RTMBUFSZ);
     rtm->rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK;
-    rtm->rtm_flags = RTF_UP | RTF_STATIC | RTF_GATEWAY;
+
+    if(!isLinkLocal)
+        rtm->rtm_flags = RTF_UP | RTF_STATIC | RTF_GATEWAY;
+
     rtm->rtm_msglen = sizeof (rtbuf);
     rtm->rtm_pid = getpid();
     rtm->rtm_type = RTM_ADD;
@@ -1153,7 +1207,7 @@ addRoute(const char *ifname, const char *gw, const char *dst, int dstpfx)
 }
 
 static int
-setupStaticRoute(nvlist_t *route, const char *idx)
+setupStaticRoute(nvlist_t *route, const char *idx, int linkLocalOnly)
 {
     boolean_t linklocal = B_FALSE;
     char *slash;
@@ -1162,11 +1216,15 @@ setupStaticRoute(nvlist_t *route, const char *idx)
     char *gateway;
     int dstpfx = -1;
     int ret = -1;
+    int isLinkLocal = 0;
 
     if (nvlist_lookup_boolean_value(route, "linklocal", &linklocal) == 0 &&
       linklocal) {
-        WARNLOG("route[%s]: linklocal routes not supported", idx);
-        goto bail;
+        if (linkLocalOnly) {
+          isLinkLocal = 1;
+        } else {
+            goto bail;
+        }
     }
 
     if (nvlist_lookup_string(route, "dst", &dst) != 0) {
@@ -1200,7 +1258,7 @@ setupStaticRoute(nvlist_t *route, const char *idx)
         goto bail;
     }
 
-    if ((ret = addRoute(NULL, gateway, dstraw, dstpfx)) != 0) {
+    if ((ret = addRoute(NULL, gateway, dstraw, dstpfx, isLinkLocal)) != 0) {
         WARNLOG("route[%s]: failed to add (%d)", idx, ret);
         goto bail;
     }
@@ -1213,7 +1271,7 @@ bail:
 }
 
 void
-setupStaticRoutes(void)
+setupStaticRoutes(int linkLocalOnly)
 {
     nvlist_t *routes = NULL;
     uint32_t nroutes = 0;
@@ -1231,7 +1289,7 @@ setupStaticRoutes(void)
             continue;
         }
 
-        (void) setupStaticRoute(route, idx);
+        (void) setupStaticRoute(route, idx, linkLocalOnly);
     }
 
     nvlist_free(routes);
@@ -1250,8 +1308,11 @@ setupNetworking()
     /*
      * Configure any additional static routes from NAPI networks:
      */
-    setupStaticRoutes();
 
+    /* link local routes first. */
+    setupStaticRoutes(1);
+    setupGateways();
+    setupStaticRoutes(0);
     closeIpadmHandle();
 }
 
@@ -1279,6 +1340,7 @@ doNfsMount(const char *nfsvolume, const char *mountpoint, boolean_t readonly)
     if ((pid = fork()) == -1) {
         fatal(ERR_FORK_FAILED, "fork() failed: %s\n", strerror(errno));
     }
+
 
     if (pid == 0) {
         /* child */
