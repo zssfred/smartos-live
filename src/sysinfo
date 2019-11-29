@@ -386,8 +386,8 @@ function get_smartos_network_interfaces()
 			| grep -v "^LINK " | awk '{ print $1,$3 }' | tr ' ' '=')
 	simnets=$(/sbin/dladm show-simnet \
 			| grep -v "^LINK " | awk '{ print $1,$3 }' | tr ' ' '=')
-	# lines="$lines $simnets"
-	lines="$lines"
+	lines="$lines $simnets"
+	#lines="$lines"
     for line in $lines ; do
 			
         nicnames=
@@ -437,6 +437,16 @@ nic_tag_count=0
         link_status=${fields[1]}
         eval "Network_Interface_${iface}_Link_Status=${link_status}"
 
+    done
+
+    for line in $(dladm show-link -p -olink,state,class); do
+        fields=(${line//:/ })
+        class=${fields[2]}
+        if [[ ${class} -eq simnet ]] ; then
+          iface=${fields[0]}
+          link_status=${fields[1]}
+          eval "Network_Interface_${iface}_Link_Status=${link_status}"
+        fi
     done
 
     up_count=1
@@ -531,7 +541,7 @@ function get_bridges()
         fields=(${line//=/ })
         iface=${fields[0]}
 		addr=$(echo ${fields[2]} | awk -F '/' '{print $2}')
-                [[ addr -n ]] && addr="00:00:00:00:00:00"
+                [[ -z ${addr} ]] && addr="00:00:00:00:00:00"
 		normalize_mac ${addr}
 		mac=${normalized}
         Bridges[${count}]=${iface}
@@ -1065,7 +1075,7 @@ END
 
         ((printed++))
         trailing_comma=","
-        [[ ${printed} -eq ${#BSimnets[*]} ]] && trailing_comma=''
+        [[ ${printed} -eq ${#Simnets[*]} ]] && trailing_comma=''
         echo -n "    \"${iface}\": {"
         echo -n "\"MAC Address\": \"${mac}\"}"
 	
