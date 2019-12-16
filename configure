@@ -164,7 +164,8 @@ function create_projects
 			git_name="illumos-${project_name}.git"
 			;;
 		'illumos')
-			git_name="illumos-joyent.git"
+			#git_name="illumos-joyent.git"
+			git_name="illumos-joyent"
 			;;
 		'ur-agent')
 			git_name="sdc-ur-agent.git"
@@ -175,6 +176,9 @@ function create_projects
 		case $project_url in
 		'origin'|'')
 			project_url="$git_stem/$git_name"
+                        ;;
+		'bill')
+			project_url="https://git.sr.ht/~hww3/$git_name"
 			;;
 		esac
 		checkout_project "projects/$project_dir" "$project_branch" \

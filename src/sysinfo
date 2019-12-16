@@ -395,6 +395,7 @@ function get_smartos_network_interfaces()
         iface=${fields[0]}
         normalize_mac ${fields[1]}
         mac=${normalized}
+        #echo "fred2 nicnames ${nicnames}"
         ip4addr=$(ifconfig ${iface} 2>/dev/null \
             | grep "inet " | awk '{ print $2 }')
 
@@ -403,15 +404,27 @@ nic_tag_count=0
         while [[ ${nic_tag_count} -lt ${NicTagCount} ]]; do
             tag_name=${NicTagNames[${nic_tag_count}]}
             tag_mac=${NicTagMacs[${nic_tag_count}]}
+            tag_type=${NicTagTypes[${nic_tag_count}]}  #fred
+            tag_link=${NicTagLinks[${nic_tag_count}]}  #fred
             ((nic_tag_count++))
 
             # Aggregations in this list will have a MAC address of "-",
             # so this won't match
             if [[ "${tag_mac}" == "${mac}" ]]; then
+            #echo "fred5 tag_type ${tag_type}"
                 [[ -n ${nicnames} ]] && nicnames="${nicnames},"
+        #echo "fred3 nicnames ${nicnames}"
                 nicnames="${nicnames}${tag_name}"
+        #echo "fred4 nicnames ${nicnames}"
                 NicTags[${nic_tag_count}]="${tag_name}=${iface}"
             fi
+
+            if [[ ${tag_type} == "simnet" ]]; then                #fred
+                NicTags[${nic_tag_count}]="${tag_name}=${tag_name}"  #fred
+           #echo "fred5 ${nic_tag_count} ${tag_name}=${tag_name}"
+            fi                                                    #fred
+
+        #echo "fred1 nicnames ${nicnames}"
         done
 
         NetworkInterfaces[${count}]=${iface}
@@ -642,17 +655,23 @@ function get_nic_tags()
 {
     NicTagCount=0
     NicTagList=
-    for line in $(nictagadm list -d '=' -p -L 2>/dev/null); do
+    #fred for line in $(nictagadm list -d '=' -p -L 2>/dev/null); do
+    for line in $(nictagadm list -d '=' -p  2>/dev/null); do
         fields=(${line//=/ })
 
         NicTagNames[${NicTagCount}]=${fields[0]}
         NicTagMacs[${NicTagCount}]=${fields[1]}
         NicTagLinks[${NicTagCount}]=${fields[2]}
+        NicTagTypes[${NicTagCount}]=${fields[3]}  #fred
 
         [[ -n $NicTagList ]] && NicTagList=${NicTagList},
         NicTagList=${NicTagList}${fields[0]}
         ((NicTagCount++))
     done
+    #echo "fred NicTagNames ${NicTagNames[@]}"
+    #echo "fred NicTagMacs ${NicTagMacs[@]}"
+    #echo "fred NicTagLinks ${NicTagLinks[@]}"
+    #echo "fred NicTagTypes ${NicTagTypes[@]}"
 }
 
 function get_aggr_params()

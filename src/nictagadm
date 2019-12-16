@@ -233,8 +233,10 @@ function get_link_names()
     local mac link
     while IFS=: read mac link; do
         mac=$(normalize_mac "$mac")
+        #echo "fred mac=$mac link=$link"
         LINKS[$mac]=$link
 		LINK_TYPES[$mac]='normal'
+                #echo "fred3 ${!LINK_TYPES[@]} ---- ${LINK_TYPES[@]}"
     done <<< "$out"
 }
 
@@ -255,13 +257,18 @@ function get_bridge_names()
 {
     local out=$(dladm show-bridge -po address,bridge)
     (( $? == 0 )) || fatal 'failed to call dladm'
-    local mac link prio
+    local mac link prio tmp1
     while IFS=: read mac link; do
 		while IFS=/ read prio mac; do
 	        mac=$(normalize_mac "$mac")
+                tmp1="${prio}/${mac}"
+                #echo "fred4 prio $prio ---- mac $mac ---- tmp1 $tmp1"
 		done <<< "$mac" 
-        LINKS["${prio}/${mac}"]=$link
-		LINK_TYPES["${prio}/${mac}"]='bridge'
+        #LINKS["${prio}/${mac}"]=$link
+	#	LINK_TYPES["${prio}"/"${mac}"]='bridge'
+        LINKS[${tmp1}]=$link
+		LINK_TYPES[${tmp1}]='bridge'
+                #echo "fred4 ${LINK_TYPES[@]} ---- ${!LINKS[@]}"
     done <<< "$out"
 }
 
@@ -451,6 +458,7 @@ function tag_exists()
 {
     local typ tag num rule_re
     cmd_tag_list > /dev/null
+    #fred cmd_tag_list 
 
     #
     # The '/' character is basically toxic to the shell when it comes to
@@ -472,6 +480,7 @@ function tag_exists()
     valid_gen_name "$1" || return 1
 
     typ=${TAG_TYPES[$1]}
+    #echo "fred ${!TAG_TYPES[@]} ${TAG_TYPES[@]}"
     [[ $typ == "overlay_rule" ]] && return 1
     [[ -n $typ ]] && return 0
 
@@ -1038,6 +1047,7 @@ function cmd_tag_list()
     get_link_names
     get_simnet_names
     get_bridge_names
+    #echo "fred3 ${!LINK_TYPES[@]} ---- ${LINK_TYPES[@]}"
 
     if [[ -z $LOCAL ]]; then
         # turn conf into associative array
@@ -1054,13 +1064,16 @@ function cmd_tag_list()
             [[ $key =~ $nic_re ]] || continue
             tag=${key%_nic}
             val=${conf[$key]}
+            val=$(normalize_mac "$val")   #fred
 
             if valid_stub_name "$val"; then
                 TAG_TYPES[$tag]='aggr'
                 print_line "$tag" "-" "$val"
             else
 				link_type=${LINK_TYPES[$val]}
-				if [ $link_type != 'normal' ] ; then
+                                #echo "fred4 val=$val link_type=${LINK_TYPES[$val]}"
+                                #echo "fred4 ${!LINK_TYPES[@]} --- ${LINK_TYPES[@]}"
+				if [[ $link_type != 'normal' ]] ; then
 					TAG_TYPES[$tag]=$link_type
 				else	
                   TAG_TYPES[$tag]='normal'
